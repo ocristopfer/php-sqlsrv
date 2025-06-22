@@ -54,7 +54,7 @@ RUN a2enmod ssl \
     && a2enmod rewrite
 
 # Copy configuration files
-COPY ./config/odbc/odbcinst.ini /etc/odbcinst.ini
+COPY ./config/odbc/odbcinst17.ini /etc/odbcinst.ini
 COPY ./config/php/99-custom_overrides.ini /usr/local/etc/php/conf.d/99-custom_overrides.ini
 COPY ./config/apache/000-default.conf /etc/apache2/sites-available/000-default.conf
 
