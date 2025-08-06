@@ -15,7 +15,20 @@ RUN apt-get update \
     curl \
     nginx \
     supervisor \
+    locales \
     && rm -rf /var/lib/apt/lists/*
+
+# Configure Portuguese (Brazil) locale with ISO-8859-1 for legacy compatibility
+RUN sed -i '/^#.*pt_BR.ISO-8859-1/s/^#//' /etc/locale.gen \
+    && sed -i '/^#.*pt_BR.UTF-8/s/^#//' /etc/locale.gen \
+    && locale-gen \
+    && update-locale LANG=pt_BR.ISO-8859-1 LC_ALL=pt_BR.ISO-8859-1
+
+# Set locale environment variables for Windows-like charset behavior
+ENV LANG=pt_BR.ISO-8859-1
+ENV LC_ALL=pt_BR.ISO-8859-1
+ENV LC_CTYPE=pt_BR.ISO-8859-1
+ENV LANGUAGE=pt_BR:pt:en
 
 # Install Microsoft ODBC Driver for Debian 11 (Bullseye)
 RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | tee /usr/share/keyrings/microsoft.asc > /dev/null \
