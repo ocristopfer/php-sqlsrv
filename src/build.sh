@@ -6,9 +6,12 @@
 set -e  # Exit on any error
 
 # Configuration
-IMAGE_NAME="php-sqlsrv"  # Change this to your desired image name
-BUILD_CONTEXT="."        # Build context directory
-REGISTRY="ocristopfer/"              # Optional: Add your registry URL (e.g., "myregistry.com/")
+IMAGE_NAME="php-sqlsrv"
+REGISTRY="ocristopfer/"
+
+# Resolve the directory where this script lives so it works from any CWD
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_CONTEXT="$SCRIPT_DIR"
 
 # Colors for output
 RED='\033[0;31m'
@@ -17,46 +20,27 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Function to print colored output
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
+print_status()  { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+print_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# Function to extract PHP version and variant from filename
+# Extract PHP version and variant from filename
+# e.g. "php7-4.Dockerfile" -> "7.4|"
+#      "php7-4-nginx.Dockerfile" -> "7.4|nginx"
 get_php_info() {
     local filename="$1"
-    local php_version=""
-    local variant=""
-    
-    # Extract version and variant from filename like:
-    # "php7-4.Dockerfile" -> version: "7.4", variant: ""
-    # "php7-4-nginx.Dockerfile" -> version: "7.4", variant: "nginx"
-    # "php8-3-fpm.Dockerfile" -> version: "8.3", variant: "fpm"
     if [[ "$filename" =~ php([0-9]+)-([0-9]+)(-(.+))?\.Dockerfile ]]; then
-        php_version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
-        variant="${BASH_REMATCH[4]}"
+        echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}|${BASH_REMATCH[4]}"
+    else
+        echo "|"
     fi
-    
-    echo "$php_version|$variant"
 }
 
-# Function to create tag from PHP version and variant
+# Build the full image tag
 create_tag() {
     local php_version="$1"
     local variant="$2"
-    
     if [ -n "$variant" ]; then
         echo "${REGISTRY}${IMAGE_NAME}:php${php_version}-${variant}"
     else
@@ -64,261 +48,271 @@ create_tag() {
     fi
 }
 
-# Function to build Docker image
+# Build a single image; optionally push it afterwards
 build_image() {
     local dockerfile="$1"
     local php_version="$2"
     local variant="$3"
-    local quiet="$4"
-    local tag=$(create_tag "$php_version" "$variant")
+    local do_push="${4:-false}"
+    local tag
+    tag=$(create_tag "$php_version" "$variant")
 
-    if [ "$quiet" != "true" ]; then
-        print_status "Building image: $tag"
-        print_status "Using Dockerfile: $dockerfile"
-    fi
+    print_status "Building $tag  (Dockerfile: $(basename "$dockerfile"))"
 
-    if [ "$quiet" = "true" ]; then
-        if docker build -f "$dockerfile" -t "$tag" "$BUILD_CONTEXT" > /dev/null 2>&1; then
-            print_success "Successfully built: $tag"
-            return 0
-        else
-            print_error "Failed to build: $tag"
-            return 1
-        fi
-    else
-        if docker build -f "$dockerfile" -t "$tag" "$BUILD_CONTEXT"; then
-            print_success "Successfully built: $tag"
-            return 0
-        else
-            print_error "Failed to build: $tag"
-            return 1
-        fi
+    docker build -f "$dockerfile" -t "$tag" "$BUILD_CONTEXT" || {
+        print_error "Failed to build: $tag"
+        return 1
+    }
+    print_success "Built: $tag"
+
+    if [ "$do_push" = "true" ]; then
+        push_image "$tag"
     fi
 }
 
-# Function to list available Dockerfiles
+# Push a single tag to the registry
+push_image() {
+    local tag="$1"
+    print_status "Pushing $tag ..."
+    docker push "$tag" || {
+        print_error "Failed to push: $tag"
+        return 1
+    }
+    print_success "Pushed: $tag"
+}
+
+# List available Dockerfiles
 list_dockerfiles() {
     print_status "Available Dockerfiles:"
-    for dockerfile in php*.Dockerfile; do
-        if [ -f "$dockerfile" ]; then
-            local info=$(get_php_info "$dockerfile")
-            local php_version=$(echo "$info" | cut -d'|' -f1)
-            local variant=$(echo "$info" | cut -d'|' -f2)
-            
-            if [ -n "$php_version" ]; then
-                if [ -n "$variant" ]; then
-                    echo "  - $dockerfile (PHP $php_version - $variant)"
-                else
-                    echo "  - $dockerfile (PHP $php_version)"
-                fi
-            else
-                echo "  - $dockerfile (Unable to parse version)"
-            fi
+    for dockerfile in "$SCRIPT_DIR"/php*.Dockerfile; do
+        [ -f "$dockerfile" ] || continue
+        local info php_version variant
+        info=$(get_php_info "$(basename "$dockerfile")")
+        php_version="${info%%|*}"
+        variant="${info##*|}"
+        if [ -n "$php_version" ]; then
+            local label="PHP $php_version"
+            [ -n "$variant" ] && label="$label - $variant"
+            echo "  - $(basename "$dockerfile") ($label)"
+        else
+            echo "  - $(basename "$dockerfile") (unable to parse version)"
         fi
     done
 }
 
-# Function to build all images
+# Build (and optionally push) all images
 build_all() {
-    local success_count=0
-    local total_count=0
+    local do_push="${1:-false}"
+    local success_count=0 total_count=0
     local failed_builds=()
-    local quiet="${1:-false}"
 
-    if [ "$quiet" != "true" ]; then
-        print_status "Starting build process for all PHP versions..."
+    print_status "Starting build for all PHP versions..."
+    [ "$do_push" = "true" ] && print_status "Images will be pushed after each build."
+    echo
+
+    for dockerfile in "$SCRIPT_DIR"/php*.Dockerfile; do
+        [ -f "$dockerfile" ] || continue
+        local info php_version variant
+        info=$(get_php_info "$(basename "$dockerfile")")
+        php_version="${info%%|*}"
+        variant="${info##*|}"
+
+        if [ -z "$php_version" ]; then
+            print_warning "Could not extract PHP version from: $(basename "$dockerfile")"
+            continue
+        fi
+
+        total_count=$((total_count + 1))
         echo
-    fi
+        local label="PHP $php_version"
+        [ -n "$variant" ] && label="$label - $variant"
+        print_status "[$total_count] $label"
 
-    for dockerfile in php*.Dockerfile; do
-        if [ -f "$dockerfile" ]; then
-            local info=$(get_php_info "$dockerfile")
-            local php_version=$(echo "$info" | cut -d'|' -f1)
-            local variant=$(echo "$info" | cut -d'|' -f2)
-
-            if [ -z "$php_version" ]; then
-                if [ "$quiet" != "true" ]; then
-                    print_warning "Could not extract PHP version from: $dockerfile"
-                fi
-                continue
-            fi
-
-            ((total_count++))
-
-            if [ "$quiet" != "true" ]; then
-                echo
-                if [ -n "$variant" ]; then
-                    print_status "Building $total_count: $dockerfile (PHP $php_version - $variant)"
-                else
-                    print_status "Building $total_count: $dockerfile (PHP $php_version)"
-                fi
-            fi
-
-            if build_image "$dockerfile" "$php_version" "$variant" "$quiet"; then
-                ((success_count++))
-            else
-                failed_builds+=("$dockerfile")
-            fi
+        if build_image "$dockerfile" "$php_version" "$variant" "$do_push"; then
+            success_count=$((success_count + 1))
+        else
+            failed_builds+=("$(basename "$dockerfile")")
         fi
     done
 
     echo
     print_status "Build Summary:"
-    echo "  Total builds: $total_count"
+    echo "  Total:      $total_count"
     echo "  Successful: $success_count"
-    echo "  Failed: $((total_count - success_count))"
+    echo "  Failed:     $((total_count - success_count))"
 
     if [ ${#failed_builds[@]} -gt 0 ]; then
         echo
         print_error "Failed builds:"
-        for failed in "${failed_builds[@]}"; do
-            echo "  - $failed"
-        done
+        for f in "${failed_builds[@]}"; do echo "  - $f"; done
         return 1
-    else
-        echo
-        print_success "All builds completed successfully!"
-        return 0
     fi
+
+    echo
+    print_success "All builds completed successfully!"
 }
 
-# Function to build specific PHP version (with optional variant)
+# Build (and optionally push) a specific version/variant
 build_specific() {
     local target_version="$1"
     local target_variant="${2:-}"
-    local dockerfile=""
-    
-    # Determine the dockerfile name based on version and variant
+    local do_push="${3:-false}"
+    local dockerfile
+
     if [ -n "$target_variant" ]; then
-        dockerfile="php${target_version//./-}-${target_variant}.Dockerfile"
+        dockerfile="$SCRIPT_DIR/php${target_version//./-}-${target_variant}.Dockerfile"
     else
-        dockerfile="php${target_version//./-}.Dockerfile"
+        dockerfile="$SCRIPT_DIR/php${target_version//./-}.Dockerfile"
     fi
 
     if [ ! -f "$dockerfile" ]; then
-        print_error "Dockerfile not found: $dockerfile"
-        
-        # Show available alternatives
+        print_error "Dockerfile not found: $(basename "$dockerfile")"
         print_status "Available Dockerfiles for PHP $target_version:"
-        for alt_dockerfile in php${target_version//./-}*.Dockerfile; do
-            if [ -f "$alt_dockerfile" ]; then
-                local info=$(get_php_info "$alt_dockerfile")
-                local variant=$(echo "$info" | cut -d'|' -f2)
-                if [ -n "$variant" ]; then
-                    echo "  - $alt_dockerfile (variant: $variant)"
-                else
-                    echo "  - $alt_dockerfile (base version)"
-                fi
+        for alt in "$SCRIPT_DIR"/php${target_version//./-}*.Dockerfile; do
+            [ -f "$alt" ] || continue
+            local info variant
+            info=$(get_php_info "$(basename "$alt")")
+            variant="${info##*|}"
+            if [ -n "$variant" ]; then
+                echo "  - $(basename "$alt") (variant: $variant)"
+            else
+                echo "  - $(basename "$alt") (base)"
             fi
         done
         return 1
     fi
 
-    build_image "$dockerfile" "$target_version" "$target_variant"
+    build_image "$dockerfile" "$target_version" "$target_variant" "$do_push"
 }
 
-# Function to show built images
+# Push all images that match the image name pattern
+push_all() {
+    print_status "Pushing all ${IMAGE_NAME} images..."
+    local tags
+    tags=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "^${REGISTRY}${IMAGE_NAME}:php")
+    if [ -z "$tags" ]; then
+        print_warning "No local images found matching ${REGISTRY}${IMAGE_NAME}:php*"
+        return 1
+    fi
+    while IFS= read -r tag; do
+        push_image "$tag"
+    done <<< "$tags"
+    print_success "All pushes completed."
+}
+
 show_images() {
     print_status "Built images:"
-    docker images | grep "$IMAGE_NAME" | head -20
+    docker images | grep "$IMAGE_NAME"
 }
 
-# Function to clean up images
 cleanup_images() {
-    print_warning "This will remove all images matching pattern: ${IMAGE_NAME}:php*"
+    print_warning "This will remove all images matching: ${REGISTRY}${IMAGE_NAME}:php*"
     read -p "Are you sure? (y/N): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        docker images --format "table {{.Repository}}:{{.Tag}}" | grep "${IMAGE_NAME}:php" | xargs -r docker rmi
-        print_success "Cleanup completed"
+        docker images --format "{{.Repository}}:{{.Tag}}" \
+            | grep "^${REGISTRY}${IMAGE_NAME}:php" \
+            | xargs -r docker rmi
+        print_success "Cleanup completed."
     else
-        print_status "Cleanup cancelled"
+        print_status "Cleanup cancelled."
     fi
 }
 
-# Function to show help
 show_help() {
     cat << EOF
 Docker Build Script for Multiple PHP Versions and Variants
 
-Usage: $0 [COMMAND] [OPTIONS]
+Usage: $0 <command> [options]
 
 Commands:
-    build-all              Build all PHP versions and variants
-    build <version>        Build specific PHP version (e.g., 7.4, 8.3)
-    build <version> <variant>   Build specific PHP version with variant (e.g., 7.4 nginx)
-    list                   List available Dockerfiles
-    images                 Show built images
-    cleanup                Remove all built images
-    help                   Show this help message
+  build-all                     Build all PHP versions/variants
+  build-all --push              Build all and push to registry
+  push-all                      Push all already-built images
+
+  build <version> [variant]     Build a specific version (e.g. 8.3, 7.4 nginx)
+  build <version> [variant] --push   Build and push
+
+  push <version> [variant]      Push a specific image
+
+  list                          List available Dockerfiles
+  images                        Show locally built images
+  cleanup                       Remove all built images
+  help                          Show this message
 
 Examples:
-    $0 build-all           # Build all available PHP versions and variants
-    $0 build 8.3           # Build only PHP 8.3 (base version)
-    $0 build 7.4 nginx     # Build PHP 7.4 with nginx variant
-    $0 build 8.1 fpm       # Build PHP 8.1 with fpm variant
-    $0 list                # List available Dockerfiles
-    $0 images              # Show built images
-    $0 cleanup             # Clean up all built images
+  $0 build-all
+  $0 build-all --push
+  $0 build 8.3
+  $0 build 7.4 nginx --push
+  $0 push 8.4
+  $0 push-all
+  $0 list
+  $0 images
+  $0 cleanup
 
-Supported Dockerfile patterns:
-    php7-4.Dockerfile              -> php-sqlsrv:php7.4
-    php7-4-nginx.Dockerfile        -> php-sqlsrv:php7.4-nginx
-    php8-3-fpm.Dockerfile          -> php-sqlsrv:php8.3-fpm
-    php8-1-apache.Dockerfile       -> php-sqlsrv:php8.1-apache
-
-Configuration:
-    Edit the script to change:
-    - IMAGE_NAME: Base name for your images
-    - REGISTRY: Docker registry URL (optional)
-    - BUILD_CONTEXT: Build context directory
-
+Tag format:
+  php7-4.Dockerfile          -> ${REGISTRY}${IMAGE_NAME}:php7.4
+  php7-4-nginx.Dockerfile    -> ${REGISTRY}${IMAGE_NAME}:php7.4-nginx
+  php8-3.Dockerfile          -> ${REGISTRY}${IMAGE_NAME}:php8.3
+  php8-4.Dockerfile          -> ${REGISTRY}${IMAGE_NAME}:php8.4
 EOF
 }
 
-# Main script logic
-main() {
-    case "${1:-}" in
-        "build-all")
-            build_all
-            ;;
-        "build")
-            if [ -z "$2" ]; then
-                print_error "Please specify PHP version (e.g., 7.4, 8.3)"
-                exit 1
-            fi
-            build_specific "$2" "$3"
-            ;;
-        "list")
-            list_dockerfiles
-            ;;
-        "images")
-            show_images
-            ;;
-        "cleanup")
-            cleanup_images
-            ;;
-        "help"|"-h"|"--help")
-            show_help
-            ;;
-        "")
-            print_error "No command specified"
-            show_help
-            exit 1
-            ;;
-        *)
-            print_error "Unknown command: $1"
-            show_help
-            exit 1
-            ;;
-    esac
-}
+# ── Main ────────────────────────────────────────────────────────────────────
 
-# Check if Docker is available
 if ! command -v docker &> /dev/null; then
     print_error "Docker is not installed or not in PATH"
     exit 1
 fi
 
-# Run main function with all arguments
-main "$@"
+case "${1:-}" in
+    build-all)
+        DO_PUSH=false
+        [[ "${2:-}" == "--push" ]] && DO_PUSH=true
+        build_all "$DO_PUSH"
+        ;;
+    build)
+        if [ -z "${2:-}" ]; then
+            print_error "Please specify a PHP version (e.g., 7.4, 8.3)"
+            exit 1
+        fi
+        VERSION="$2"
+        VARIANT=""
+        DO_PUSH=false
+        # parse remaining args: optional variant (no --) and optional --push
+        shift 2
+        for arg in "$@"; do
+            case "$arg" in
+                --push) DO_PUSH=true ;;
+                *)      VARIANT="$arg" ;;
+            esac
+        done
+        build_specific "$VERSION" "$VARIANT" "$DO_PUSH"
+        ;;
+    push-all)
+        push_all
+        ;;
+    push)
+        if [ -z "${2:-}" ]; then
+            print_error "Please specify a PHP version (e.g., 7.4, 8.3)"
+            exit 1
+        fi
+        TAG=$(create_tag "$2" "${3:-}")
+        push_image "$TAG"
+        ;;
+    list)    list_dockerfiles ;;
+    images)  show_images ;;
+    cleanup) cleanup_images ;;
+    help|-h|--help) show_help ;;
+    "")
+        print_error "No command specified."
+        show_help
+        exit 1
+        ;;
+    *)
+        print_error "Unknown command: $1"
+        show_help
+        exit 1
+        ;;
+esac
