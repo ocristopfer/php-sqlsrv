@@ -57,7 +57,9 @@ RUN ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default \
     && rm -f /etc/nginx/sites-enabled/default.conf \
     && nginx -t \
     && chown -R www-data:www-data /var/www/html \
-    && chmod -R 755 /var/www/html
+    && chmod -R 755 /var/www/html \
+    && cp /etc/ssl/certs/localhost.crt /usr/local/share/ca-certificates/localhost.crt \
+    && update-ca-certificates
 
 WORKDIR /var/www/html
 EXPOSE 80 443

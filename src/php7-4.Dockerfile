@@ -49,4 +49,7 @@ COPY ./config/ssl/localhost.crt /etc/ssl/certs/localhost.crt
 COPY ./config/ssl/localhost.key /etc/ssl/private/localhost.key
 COPY ./index.php /var/www/html/
 
+RUN cp /etc/ssl/certs/localhost.crt /usr/local/share/ca-certificates/localhost.crt \
+    && update-ca-certificates
+
 WORKDIR /var/www/html
